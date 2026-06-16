@@ -17,136 +17,178 @@ class HandDetector:
         self.detector = vision.HandLandmarker.create_from_options(options)
         self.latest_result = None
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Drawing
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     def find_hands(self, frame, draw=True):
-        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         self.latest_result = self.detector.detect(mp_image)
 
         connections = [
-            (0, 1), (1, 2), (2, 3), (3, 4),
-            (0, 5), (5, 6), (6, 7), (7, 8),
-            (0, 9), (9, 10), (10, 11), (11, 12),
-            (0, 13), (13, 14), (14, 15), (15, 16),
-            (0, 17), (17, 18), (18, 19), (19, 20),
-            (5, 9), (9, 13), (13, 17), (0, 17)
+            (0,1),(1,2),(2,3),(3,4),
+            (0,5),(5,6),(6,7),(7,8),
+            (0,9),(9,10),(10,11),(11,12),
+            (0,13),(13,14),(14,15),(15,16),
+            (0,17),(17,18),(18,19),(19,20),
+            (5,9),(9,13),(13,17),(0,17)
         ]
 
         if draw and self.latest_result.hand_landmarks:
             h, w, _ = frame.shape
             for hand_landmarks in self.latest_result.hand_landmarks:
                 pts = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
-                for start, end in connections:
-                    cv2.line(frame, pts[start], pts[end], (0, 255, 0), 2)
+                for s, e in connections:
+                    cv2.line(frame, pts[s], pts[e], (0, 255, 0), 2)
                 for pt in pts:
                     cv2.circle(frame, pt, 4, (0, 0, 255), -1)
-
         return frame
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Position extraction
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     def get_positions(self, frame):
         all_hands = []
-        if self.latest_result and self.latest_result.hand_landmarks:
-            h, w, _ = frame.shape
-            for i, hand_landmarks in enumerate(self.latest_result.hand_landmarks):
-                landmark_list = []
-                for idx, lm in enumerate(hand_landmarks):
-                    cx, cy, cz = int(lm.x * w), int(lm.y * h), lm.z
-                    landmark_list.append([idx, cx, cy, cz])
-                handedness = "Unknown"
-                if self.latest_result.handedness and i < len(self.latest_result.handedness):
-                    handedness = self.latest_result.handedness[i][0].display_name
-                all_hands.append({"landmarks": landmark_list, "label": handedness})
+        if not (self.latest_result and self.latest_result.hand_landmarks):
+            return all_hands
+
+        h, w, _ = frame.shape
+        for i, hand_landmarks in enumerate(self.latest_result.hand_landmarks):
+            lm_list = []
+            for idx, lm in enumerate(hand_landmarks):
+                lm_list.append([idx, int(lm.x * w), int(lm.y * h), lm.z])
+
+            handedness = "Unknown"
+            if self.latest_result.handedness and i < len(self.latest_result.handedness):
+                handedness = self.latest_result.handedness[i][0].display_name
+            all_hands.append({"landmarks": lm_list, "label": handedness})
         return all_hands
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Helpers
-    # ──────────────────────────────────────────────────────────────────────────
-    def _dist(self, p1, p2):
-        """2-D pixel distance between two landmark entries [id, cx, cy, cz]."""
-        return math.sqrt((p1[1] - p2[1]) ** 2 + (p1[2] - p2[2]) ** 2)
+    # ─────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _dist(a, b):
+        return math.hypot(a[1] - b[1], a[2] - b[2])
 
-    def _get_fingers(self, lm):
+    @staticmethod
+    def _hand_scale(lm):
+        """Wrist(0) → middle-MCP(9) as reference length."""
+        return math.hypot(lm[0][1] - lm[9][1], lm[0][2] - lm[9][2]) or 1.0
+
+    @staticmethod
+    def _orientation_angle(lm):
         """
-        Returns [thumb, index, middle, ring, pinky] — 1=extended, 0=folded.
-        Works from any camera angle by using the wrist→index-MCP vector for thumb.
+        Angle (degrees) of wrist→middle-MCP vector.
+        0° = perfectly horizontal, 90° = perfectly vertical.
         """
-        fingers = []
+        dx = lm[9][1] - lm[0][1]
+        dy = lm[9][2] - lm[0][2]
+        return math.degrees(math.atan2(abs(dy), abs(dx)))
 
-        wrist     = lm[0]
-        idx_mcp   = lm[5]
-        thumb_tip = lm[4]
-        thumb_ip  = lm[3]
+    @staticmethod
+    def _is_vertical(lm, threshold=50):
+        """True when wrist→MCP angle > threshold (hand pointing up/down)."""
+        dx = lm[9][1] - lm[0][1]
+        dy = lm[9][2] - lm[0][2]
+        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+        return angle > threshold
 
-        hand_dx  = idx_mcp[1] - wrist[1]
-        thumb_dx = thumb_tip[1] - thumb_ip[1]
-        fingers.append(1 if hand_dx * thumb_dx > 0 else 0)
+    @staticmethod
+    def _is_horizontal(lm, threshold=40):
+        """True when wrist→MCP angle < threshold (hand pointing sideways)."""
+        dx = lm[9][1] - lm[0][1]
+        dy = lm[9][2] - lm[0][2]
+        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+        return angle < threshold
 
+    @staticmethod
+    def _count_extended_fingers(lm):
+        """
+        Count how many of index/middle/ring/pinky are extended.
+        Extended = tip is higher on screen (lower y) than the PIP joint.
+        """
+        count = 0
         for tip_id in [8, 12, 16, 20]:
-            fingers.append(1 if lm[tip_id][2] < lm[tip_id - 2][2] else 0)
+            if lm[tip_id][2] < lm[tip_id - 2][2]:
+                count += 1
+        return count
 
-        return fingers  # [thumb, index, middle, ring, pinky]
+    @staticmethod
+    def _fingers_spread(lm):
+        """
+        Measures the angular spread of the four fingertips around the palm.
+        High spread = fingers fanned open wide.
+        Returns the average pixel distance between adjacent fingertips.
+        """
+        tips = [lm[8], lm[12], lm[16], lm[20]]
+        gaps = []
+        for i in range(len(tips) - 1):
+            gaps.append(math.hypot(tips[i][1] - tips[i+1][1],
+                                   tips[i][2] - tips[i+1][2]))
+        return sum(gaps) / len(gaps) if gaps else 0.0
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Sign detection — 3-sign Chidori (OX → HARE → MONKEY)
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # Gesture classifier (Now nested correctly inside the class)
+    # ─────────────────────────────────────────────────────────────────────────
     def verify_gesture(self, all_hands):
-        """
-        OX    (1 hand)  – index + middle both extended and crossed close together;
-                          ring + pinky folded; thumb out to the side.
-        HARE  (2 hands) – both hands visible; both index fingers extended (pointing
-                          forward); remaining fingers mostly curled on each hand;
-                          the two hands are close / overlapping (clasped pose).
-        MONKEY(2 hands) – both hands visible; all fingers on both hands extended
-                          (open flat palms) and the two wrists are close together
-                          (hands held side-by-side / interlocked horizontally).
-        """
-        if not all_hands:
+        if not all_hands or len(all_hands) < 2:
             return "NONE"
 
-        num_hands = len(all_hands)
+        try:
+            lm0 = all_hands[0]["landmarks"]
+            lm1 = all_hands[1]["landmarks"]
 
-        # ── Single-hand signs ────────────────────────────────────────────────
-        lm1     = all_hands[0]["landmarks"]
-        f1      = self._get_fingers(lm1)
-        _, idx1, mid1, ring1, pinky1 = f1
+            # Prevent IndexErrors if landmarks drop out unexpectedly
+            if len(lm0) < 21 or len(lm1) < 21:
+                return "NONE"
 
-        hand_scale1 = self._dist(lm1[0], lm1[9])   # wrist → mid-MCP
+            scale0 = self._hand_scale(lm0)
+            scale1 = self._hand_scale(lm1)
+            avg_scale = (scale0 + scale1) / 2.0
 
-        # OX: index + middle up, crossed close together; ring + pinky down
-        idx_mid_gap = self._dist(lm1[8], lm1[12])   # index tip vs middle tip
-        if (idx1 == 1 and mid1 == 1 and ring1 == 0 and pinky1 == 0
-                and idx_mid_gap < hand_scale1 * 0.35):
-            return "OX"
+            wrist_dist = self._dist(lm0[0], lm1[0])
+            ratio = wrist_dist / avg_scale
 
-        # ── Two-hand signs ───────────────────────────────────────────────────
-        if num_hands < 2:
+            horiz0 = self._is_horizontal(lm0)
+            horiz1 = self._is_horizontal(lm1)
+            vert0 = self._is_vertical(lm0)
+            vert1 = self._is_vertical(lm1)
+
+            spread0 = self._fingers_spread(lm0)
+            spread1 = self._fingers_spread(lm1)
+            
+            spread_ratio0 = spread0 / scale0 if scale0 else 0
+            spread_ratio1 = spread1 / scale1 if scale1 else 0
+
+            # ── 1. MONKEY/HARE Stance: Both flat horizontal ──
+            if horiz0 and horiz1:
+                # If hands are stacked flat but wrist distance ratio is closer
+                if ratio < 1.8:
+                    return "HARE"
+                
+                # Both horizontal, but arms/wrists wider apart with open fingers
+                elif ratio >= 1.8:
+                    if spread_ratio0 > 0.18 or spread_ratio1 > 0.18:
+                        return "MONKEY"
+
+            # ── 2. Cross Shape Fallbacks (OX) ──
+            is_cross = (vert0 and horiz1) or (vert1 and horiz0)
+            if is_cross and ratio < 2.5:
+                if vert0:
+                    v_spread, v_scale = spread0, scale0
+                else:
+                    v_spread, v_scale = spread1, scale1
+                    
+                s_ratio = v_spread / v_scale if v_scale else 0
+                if s_ratio > 0.35:
+                    return "MONKEY"
+                else:
+                    return "OX"
+
+        except Exception as e:
+            # Fallback that prints the issue without breaking the CV2 webcam loop
+            print(f"[SAFEMODE] Catching background anomaly: {e}")
             return "NONE"
-
-        lm2     = all_hands[1]["landmarks"]
-        f2      = self._get_fingers(lm2)
-        _, idx2, mid2, ring2, pinky2 = f2
-
-        hand_scale2   = self._dist(lm2[0], lm2[9])
-        # Distance between the two wrists
-        wrist_gap     = self._dist(lm1[0], lm2[0])
-        avg_scale     = (hand_scale1 + hand_scale2) / 2.0
-
-        # MONKEY: all fingers open on BOTH hands + wrists close together (side by side)
-        both_open = (idx1 == 1 and mid1 == 1 and ring1 == 1 and pinky1 == 1 and
-                     idx2 == 1 and mid2 == 1 and ring2 == 1 and pinky2 == 1)
-        if both_open and wrist_gap < avg_scale * 2.2:
-            return "MONKEY"
-
-        # HARE: index fingers up on BOTH hands, other fingers curled,
-        #        and hands held close / overlapping (clasped)
-        both_pointing = (idx1 == 1 and mid1 == 0 and ring1 == 0 and pinky1 == 0 and
-                         idx2 == 1 and mid2 == 0 and ring2 == 0 and pinky2 == 0)
-        if both_pointing and wrist_gap < avg_scale * 2.5:
-            return "HARE"
 
         return "NONE"

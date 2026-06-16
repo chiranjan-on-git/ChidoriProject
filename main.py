@@ -6,7 +6,7 @@ from src.hand_tracking import HandDetector
 from src.utils import overlay_transparent, draw_aesthetic_text, draw_chidori_bar
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sound helper  (uses pygame if available, otherwise silent)
+# Sound helper
 # ─────────────────────────────────────────────────────────────────────────────
 try:
     import pygame
@@ -25,34 +25,45 @@ def play_sound(path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuration  ← tweak these freely
+# Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 REQUIRED_SEQUENCE  = ["OX", "HARE", "MONKEY"]
-SEQUENCE_TIMEOUT   = 4.0   # seconds — reset if next sign isn't shown in time
-SIGN_DEBOUNCE      = 0.6   # seconds — min gap between two accepted signs
-CHIDORI_DURATION   = 8.0   # seconds — how long Chidori stays active
+SEQUENCE_TIMEOUT   = 5.0
+SIGN_DEBOUNCE      = 0.8
+CHIDORI_DURATION   = 8.0
 CHIDORI_SOUND_PATH = "assets/sfx/chidori.wav"
 CHIDORI_IMG_PATH   = "assets/chidori.png"
+EFFECT_SIZE        = (360, 360)  # Increased from 220 to 360
+EFFECT_OFFSET      = (-180, -180) # Re-centered (-360/2, -360/2)
 
-EFFECT_SIZE        = (220, 220)    # (width, height) of the lightning overlay
-EFFECT_OFFSET      = (-110, -130)  # pixel shift from palm centroid (x, y)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Load assets
-# ─────────────────────────────────────────────────────────────────────────────
-chidori_img = None
-if os.path.exists(CHIDORI_IMG_PATH):
-    chidori_img = cv2.imread(CHIDORI_IMG_PATH, cv2.IMREAD_UNCHANGED)
-    if chidori_img is not None and chidori_img.shape[2] < 4:
-        chidori_img = cv2.cvtColor(chidori_img, cv2.COLOR_BGR2BGRA)
+# Set True while testing — shows live orientation + finger readings on screen
+DEBUG_MODE         = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Palm centroid helper
+# Load chidori image safely
+# ─────────────────────────────────────────────────────────────────────────────
+def _load_chidori(path):
+    if not os.path.exists(path):
+        print(f"[WARN] chidori image not found at: {path}")
+        return None
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        print(f"[WARN] cv2 could not read: {path}")
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+    elif img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    return img
+
+chidori_img = _load_chidori(CHIDORI_IMG_PATH)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Palm centroid
 # ─────────────────────────────────────────────────────────────────────────────
 def palm_centroid(landmarks):
-    """Average position of wrist + 4 knuckle bases."""
     ids = [0, 5, 9, 13, 17]
     xs  = [landmarks[i][1] for i in ids]
     ys  = [landmarks[i][2] for i in ids]
@@ -60,13 +71,50 @@ def palm_centroid(landmarks):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Debug overlay — shows raw readings so you can tune thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+def render_debug(frame, detector, all_hands, detected_sign):
+    import math
+    h, w = frame.shape[:2]
+    y = h - 130
+
+    lines = [f"Detected: {detected_sign}", f"Hands: {len(all_hands)}"]
+
+    for i, hand in enumerate(all_hands):
+        lm = hand["landmarks"]
+
+        dx = lm[9][1] - lm[0][1]
+        dy = lm[9][2] - lm[0][2]
+        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+
+        ext = detector._count_extended_fingers(lm)
+        spread = detector._fingers_spread(lm)
+        scale  = detector._hand_scale(lm)
+        spread_ratio = spread / scale if scale else 0
+
+        ori = "VERT" if angle > 50 else ("HORIZ" if angle < 40 else "MID")
+        lines.append(f"H{i}: {ori}({angle:.0f}deg) ext={ext} spread={spread_ratio:.2f}")
+
+    if len(all_hands) == 2:
+        import math
+        lm0, lm1 = all_hands[0]["landmarks"], all_hands[1]["landmarks"]
+        wd = math.hypot(lm0[0][1]-lm1[0][1], lm0[0][2]-lm1[0][2])
+        avg_s = (detector._hand_scale(lm0) + detector._hand_scale(lm1)) / 2
+        lines.append(f"WristDist={wd:.0f} AvgScale={avg_s:.0f} ratio={wd/avg_s:.2f}")
+
+    for line in lines:
+        cv2.rectangle(frame, (5, y - 18), (5 + len(line) * 10, y + 4), (0,0,0), -1)
+        cv2.putText(frame, line, (8, y), cv2.FONT_HERSHEY_PLAIN, 1.1,
+                    (0, 255, 255), 1, cv2.LINE_AA)
+        y += 22
+
+    return frame
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HUD
 # ─────────────────────────────────────────────────────────────────────────────
-SIGN_LABELS = {
-    "OX":     "#1  OX",
-    "HARE":   "#2  HARE",
-    "MONKEY": "#3  MONKEY",
-}
+SIGN_LABELS = {"OX": "#1  OX", "HARE": "#2  HARE", "MONKEY": "#3  MONKEY"}
 
 def render_hud(frame, current_step, jutsu_activated, chidori_end_time):
     h, w = frame.shape[:2]
@@ -75,7 +123,6 @@ def render_hud(frame, current_step, jutsu_activated, chidori_end_time):
         remaining = max(0.0, chidori_end_time - time.time())
         fraction  = remaining / CHIDORI_DURATION
 
-        # Pulsing blue vignette
         pulse    = int(60 + 40 * abs(np.sin(time.time() * 4)))
         vignette = np.zeros_like(frame, dtype=np.uint8)
         cv2.rectangle(vignette, (0, 0), (w, h), (pulse, 10, 0), -1)
@@ -84,10 +131,8 @@ def render_hud(frame, current_step, jutsu_activated, chidori_end_time):
         draw_aesthetic_text(
             frame, "* C H I D O R I *",
             (w // 2 - 185, 62),
-            font_scale=1.1,
-            color=(255, 255, 255),
-            glow_color=(0, 140, 255),
-            thickness=2
+            font_scale=1.1, color=(255, 255, 255),
+            glow_color=(0, 140, 255), thickness=2
         )
         draw_chidori_bar(frame, fraction,
                          bar_x=w // 2 - 150, bar_w=300, bar_y=h - 45)
@@ -95,30 +140,16 @@ def render_hud(frame, current_step, jutsu_activated, chidori_end_time):
     elif current_step > 0:
         done = "  >  ".join(SIGN_LABELS[s] for s in REQUIRED_SEQUENCE[:current_step])
         nxt  = SIGN_LABELS[REQUIRED_SEQUENCE[current_step]]
-
-        draw_aesthetic_text(
-            frame, done, (10, 45),
-            font_scale=0.55,
-            color=(200, 255, 200),
-            glow_color=(0, 180, 80),
-            thickness=1
-        )
-        draw_aesthetic_text(
-            frame, f"Next >  {nxt}", (10, 85),
-            font_scale=0.78,
-            color=(255, 255, 120),
-            glow_color=(0, 200, 200),
-            thickness=2
-        )
-
+        draw_aesthetic_text(frame, done, (10, 45),
+            font_scale=0.55, color=(200, 255, 200),
+            glow_color=(0, 180, 80), thickness=1)
+        draw_aesthetic_text(frame, f"Next >  {nxt}", (10, 85),
+            font_scale=0.78, color=(255, 255, 120),
+            glow_color=(0, 200, 200), thickness=2)
     else:
-        draw_aesthetic_text(
-            frame, "Form Sign  #1  OX  to begin", (10, 55),
-            font_scale=0.75,
-            color=(220, 220, 220),
-            glow_color=(60, 60, 160),
-            thickness=1
-        )
+        draw_aesthetic_text(frame, "Form Sign  #1  OX  to begin", (10, 55),
+            font_scale=0.75, color=(220, 220, 220),
+            glow_color=(60, 60, 160), thickness=1)
 
     return frame
 
@@ -135,7 +166,9 @@ def main():
     chidori_end_time = 0.0
     last_sign_time   = time.time()
 
-    print("System active.  OX  →  HARE  →  MONKEY")
+    print("System active.  OX -> HARE -> MONKEY")
+    if DEBUG_MODE:
+        print("[DEBUG MODE ON] Live readings shown on screen. Set DEBUG_MODE=False when done tuning.")
 
     while True:
         ret, frame = cap.read()
@@ -159,6 +192,7 @@ def main():
                 current_step = 0
 
         # Gesture check
+        detected = "NONE"
         if all_hands and not jutsu_activated:
             detected = detector.verify_gesture(all_hands)
 
@@ -166,25 +200,28 @@ def main():
                 if time.time() - last_sign_time > SIGN_DEBOUNCE or current_step == 0:
                     current_step  += 1
                     last_sign_time = time.time()
-                    print(f"✔ {detected}  ({current_step}/{len(REQUIRED_SEQUENCE)})")
+                    print(f"Sign confirmed: {detected}  ({current_step}/{len(REQUIRED_SEQUENCE)})")
 
                     if current_step == len(REQUIRED_SEQUENCE):
                         jutsu_activated  = True
                         chidori_end_time = time.time() + CHIDORI_DURATION
                         play_sound(CHIDORI_SOUND_PATH)
-                        print("⚡ CHIDORI ACTIVATED! ⚡")
+                        print("CHIDORI ACTIVATED!")
 
-        # Chidori lightning overlay on palm
+        # Chidori overlay
         if jutsu_activated and chidori_img is not None and all_hands:
-            lm         = all_hands[0]["landmarks"]
-            cx, cy     = palm_centroid(lm)
-            ex, ey     = cx + EFFECT_OFFSET[0], cy + EFFECT_OFFSET[1]
+            lm          = all_hands[0]["landmarks"]
+            cx, cy      = palm_centroid(lm)
+            ex, ey      = cx + EFFECT_OFFSET[0], cy + EFFECT_OFFSET[1]
             pulse_scale = 1.0 + 0.06 * np.sin(time.time() * 8)
-            pw, ph      = int(EFFECT_SIZE[0] * pulse_scale), int(EFFECT_SIZE[1] * pulse_scale)
-            frame       = overlay_transparent(frame, chidori_img, ex, ey, size=(pw, ph))
+            pw = int(EFFECT_SIZE[0] * pulse_scale)
+            ph = int(EFFECT_SIZE[1] * pulse_scale)
+            frame = overlay_transparent(frame, chidori_img, ex, ey, size=(pw, ph))
 
-        # HUD
         frame = render_hud(frame, current_step, jutsu_activated, chidori_end_time)
+
+        if DEBUG_MODE:
+            frame = render_debug(frame, detector, all_hands, detected)
 
         cv2.imshow("Chidori Jutsu Training", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
