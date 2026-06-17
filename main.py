@@ -8,20 +8,34 @@ from src.utils import overlay_transparent, draw_aesthetic_text, draw_chidori_bar
 # ─────────────────────────────────────────────────────────────────────────────
 # Sound helper
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Sound helper (Patched for Headerless & MP3 Pipeline)
+# ─────────────────────────────────────────────────────────────────────────────
 try:
     import pygame
+    # Force 44.1kHz, 16-bit stereo PCM streaming with a stable buffer size
+    pygame.mixer.pre_init(44100, -16, 2, 2048)
     pygame.mixer.init()
+    # Explicitly initialize the core framework so background channels sync
+    pygame.init() 
     _PYGAME_OK = True
-except Exception:
+except Exception as e:
+    print(f"[WARN] Failed to initialize Pygame Audio Core: {e}")
     _PYGAME_OK = False
 
 def play_sound(path):
     if not _PYGAME_OK or not os.path.exists(path):
+        print(f"[AUDIO] Audio file missing at target destination: {path}")
         return
     try:
-        pygame.mixer.Sound(path).play()
-    except Exception:
-        pass
+        if path.endswith('.mp3'):
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+        else:
+            sound = pygame.mixer.Sound(path)
+            sound.play()
+    except Exception as e:
+        print(f"[AUDIO ERROR] Pygame failed to route stream to device channels: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +45,7 @@ REQUIRED_SEQUENCE  = ["OX", "HARE", "MONKEY"]
 SEQUENCE_TIMEOUT   = 5.0
 SIGN_DEBOUNCE      = 0.8
 CHIDORI_DURATION   = 8.0
-CHIDORI_SOUND_PATH = "assets/sfx/chidori.wav"
+CHIDORI_SOUND_PATH = "assets/sfx/chidori.mp3"
 CHIDORI_IMG_PATH   = "assets/chidori.png"
 EFFECT_SIZE        = (360, 360)  # Increased from 220 to 360
 EFFECT_OFFSET      = (-180, -180) # Re-centered (-360/2, -360/2)
@@ -209,14 +223,30 @@ def main():
                         print("CHIDORI ACTIVATED!")
 
         # Chidori overlay
+        # Chidori overlay (Dynamic Arm Scaling Mode)
         if jutsu_activated and chidori_img is not None and all_hands:
-            lm          = all_hands[0]["landmarks"]
-            cx, cy      = palm_centroid(lm)
-            ex, ey      = cx + EFFECT_OFFSET[0], cy + EFFECT_OFFSET[1]
+            lm     = all_hands[0]["landmarks"]
+            cx, cy = palm_centroid(lm)
+            
+            # 1. Fetch the dynamic hand scale (Wrist to Middle Knuckle distance)
+            current_hand_scale = detector._hand_scale(lm)
+            
+            # 2. Base size scales dynamically with your arm distance.
+            # Multiplier 3.8 scales the graphic out to cover roughly 80% of your visible arm length.
+            base_dynamic_size = current_hand_scale * 3.8
+            
+            # 3. Apply the lightning breathing/pulse effect to the dynamic base size
             pulse_scale = 1.0 + 0.06 * np.sin(time.time() * 8)
-            pw = int(EFFECT_SIZE[0] * pulse_scale)
-            ph = int(EFFECT_SIZE[1] * pulse_scale)
-            frame = overlay_transparent(frame, chidori_img, ex, ey, size=(pw, ph))
+            dynamic_w = int(base_dynamic_size * pulse_scale)
+            dynamic_h = int(base_dynamic_size * pulse_scale)
+            
+            # 4. Compute the dynamic offset automatically so the center is locked to your palm
+            dynamic_offset_x = -int(dynamic_w / 2)
+            dynamic_offset_y = -int(dynamic_h / 2)
+            
+            # 5. Calculate positioning and apply the transparency overlay
+            ex, ey = cx + dynamic_offset_x, cy + dynamic_offset_y
+            frame = overlay_transparent(frame, chidori_img, ex, ey, size=(dynamic_w, dynamic_h))
 
         frame = render_hud(frame, current_step, jutsu_activated, chidori_end_time)
 
