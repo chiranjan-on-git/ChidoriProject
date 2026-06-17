@@ -51,7 +51,7 @@ EFFECT_SIZE        = (360, 360)  # Increased from 220 to 360
 EFFECT_OFFSET      = (-180, -180) # Re-centered (-360/2, -360/2)
 
 # Set True while testing — shows live orientation + finger readings on screen
-DEBUG_MODE         = True
+DEBUG_MODE         = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
